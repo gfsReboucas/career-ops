@@ -3,15 +3,18 @@
 /**
  * scan.mjs — Zero-token portal scanner
  *
- * Fetches Greenhouse, Ashby, and Lever APIs directly, applies title
- * filters from portals.yml, deduplicates against existing history,
- * and appends new offers to pipeline.md + scan-history.tsv.
+ * Fetches Greenhouse, Ashby, and Lever APIs directly. For other career
+ * pages, falls back to a Playwright browser scan that extracts job-like
+ * links from branded career pages. Applies title filters from portals.yml,
+ * deduplicates against existing history, and appends new offers to
+ * pipeline.md + scan-history.tsv.
  *
  * Zero Claude API tokens — pure HTTP + JSON.
  *
  * Usage:
  *   node scan.mjs                  # scan all enabled companies
  *   node scan.mjs --dry-run        # preview without writing files
+ *   node scan.mjs --api-only       # skip browser fallback
  *   node scan.mjs --company Cohere # scan a single company
  */
 
@@ -30,7 +33,10 @@ const APPLICATIONS_PATH = 'data/applications.md';
 mkdirSync('data', { recursive: true });
 
 const CONCURRENCY = 10;
+const BROWSER_CONCURRENCY = 2;
 const FETCH_TIMEOUT_MS = 10_000;
+const PAGE_TIMEOUT_MS = 20_000;
+const MAX_BROWSER_JOBS_PER_COMPANY = 120;
 
 // ── API detection ───────────────────────────────────────────────────
 
@@ -105,6 +111,148 @@ function parseLever(json, companyName) {
 }
 
 const PARSERS = { greenhouse: parseGreenhouse, ashby: parseAshby, lever: parseLever };
+
+// ── Browser page parser ─────────────────────────────────────────────
+
+function cleanText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function isUsefulJobTitle(title) {
+  const text = cleanText(title);
+  if (text.length < 4 || text.length > 140) return false;
+
+  const lower = text.toLowerCase();
+  const generic = new Set([
+    'apply',
+    'apply now',
+    'careers',
+    'career',
+    'jobs',
+    'job search',
+    'job openings',
+    'open positions',
+    'open vacancies',
+    'see vacancies',
+    'see all vacancies',
+    'view all jobs',
+    'view vacancies',
+    'learn more',
+    'read more',
+    'search',
+  ]);
+
+  if (generic.has(lower)) return false;
+  if (/^(all|view|see|find|search)\s+(jobs|roles|positions|vacancies)$/i.test(text)) return false;
+  if (/\b(we help|help drive|learn more|read more|meet our|life at|why join|who we are)\b/i.test(text)) return false;
+
+  const roleLike =
+    /\b(engineer|ingeniør|analyst|specialist|advisor|adviser|scientist|researcher|architect|consultant|developer|manager|lead|principal|director|head|expert|fellow)\b/i.test(text);
+  if (!roleLike) return false;
+
+  return true;
+}
+
+async function extractBrowserJobs(page, company) {
+  const rows = await page.evaluate(() => {
+    const currentUrl = location.href;
+    const toAbsoluteUrl = (href) => {
+      try {
+        return new URL(href, currentUrl).href;
+      } catch {
+        return '';
+      }
+    };
+
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const items = [];
+
+    for (const anchor of document.querySelectorAll('a[href]')) {
+      const href = anchor.getAttribute('href') || '';
+      const url = toAbsoluteUrl(href);
+      if (!url || !/^https?:\/\//i.test(url)) continue;
+
+      const text = clean(anchor.innerText || anchor.textContent || anchor.getAttribute('aria-label') || anchor.getAttribute('title'));
+      const aria = clean(anchor.getAttribute('aria-label'));
+      const title = clean(text || aria);
+      const haystack = `${href} ${url} ${title} ${aria}`.toLowerCase();
+
+      const looksLikeJobLink =
+        haystack.includes('job') ||
+        haystack.includes('career') ||
+        haystack.includes('vacanc') ||
+        haystack.includes('position') ||
+        haystack.includes('opening') ||
+        haystack.includes('recruit') ||
+        haystack.includes('apply');
+
+      if (!looksLikeJobLink) continue;
+
+      let location = '';
+      const container = anchor.closest('li, article, tr, [class*="job"], [class*="career"], [class*="position"], [class*="vacancy"], [data-testid*="job"]');
+      if (container) {
+        const containerText = clean(container.innerText || container.textContent);
+        const chunks = containerText.split(/[\n\r|•·]+/).map(clean).filter(Boolean);
+        const locationLike = chunks.find(part =>
+          /\b(norway|oslo|kongsberg|trondheim|stavanger|bergen|drammen|asker|remote|hybrid|denmark|sweden|finland|germany|uk|united kingdom|europe|emea)\b/i.test(part) &&
+          part.length <= 90 &&
+          part !== title
+        );
+        location = locationLike || '';
+      }
+
+      items.push({ title, url, location });
+    }
+
+    return items;
+  });
+
+  const seen = new Set();
+  const jobs = [];
+  for (const row of rows) {
+    const title = cleanText(row.title);
+    const url = cleanText(row.url).replace(/[),.]+$/, '');
+    if (!isUsefulJobTitle(title) || !url) continue;
+
+    const key = `${title.toLowerCase()}::${url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    jobs.push({
+      title,
+      url,
+      company: company.name,
+      location: cleanText(row.location),
+    });
+
+    if (jobs.length >= MAX_BROWSER_JOBS_PER_COMPANY) break;
+  }
+
+  return jobs;
+}
+
+async function scanBrowserCompany(browser, company) {
+  const page = await browser.newPage();
+  page.setDefaultTimeout(PAGE_TIMEOUT_MS);
+
+  try {
+    await page.goto(company.careers_url, {
+      waitUntil: 'domcontentloaded',
+      timeout: PAGE_TIMEOUT_MS,
+    });
+
+    // Let client-rendered job boards populate, then force lazy lists to load.
+    await page.waitForTimeout(1500);
+    for (let i = 0; i < 3; i++) {
+      await page.mouse.wheel(0, 2500);
+      await page.waitForTimeout(400);
+    }
+
+    return await extractBrowserJobs(page, company);
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
 
 // ── Fetch with timeout ──────────────────────────────────────────────
 
@@ -252,6 +400,7 @@ async function parallelFetch(tasks, limit) {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
+  const apiOnly = args.includes('--api-only');
   const companyFlag = args.indexOf('--company');
   const filterCompany = companyFlag !== -1 ? args[companyFlag + 1]?.toLowerCase() : null;
 
@@ -265,16 +414,26 @@ async function main() {
   const companies = config.tracked_companies || [];
   const titleFilter = buildTitleFilter(config.title_filter);
 
-  // 2. Filter to enabled companies with detectable APIs
-  const targets = companies
+  // 2. Split enabled companies into structured API and browser fallback targets.
+  const enabledCompanies = companies
     .filter(c => c.enabled !== false)
-    .filter(c => !filterCompany || c.name.toLowerCase().includes(filterCompany))
+    .filter(c => !filterCompany || c.name.toLowerCase().includes(filterCompany));
+
+  const targets = enabledCompanies
     .map(c => ({ ...c, _api: detectApi(c) }))
     .filter(c => c._api !== null);
 
-  const skippedCount = companies.filter(c => c.enabled !== false).length - targets.length;
+  const browserTargets = apiOnly
+    ? []
+    : enabledCompanies
+      .filter(c => detectApi(c) === null)
+      .filter(c => c.careers_url)
+      .filter(c => c.scan_method !== 'manual');
 
-  console.log(`Scanning ${targets.length} companies via API (${skippedCount} skipped — no API detected)`);
+  const skippedCount = enabledCompanies.length - targets.length - browserTargets.length;
+
+  console.log(`Scanning ${targets.length} companies via API and ${browserTargets.length} via browser fallback (${skippedCount} skipped)`);
+  if (apiOnly) console.log('(api-only — browser fallback disabled)');
   if (dryRun) console.log('(dry run — no files will be written)\n');
 
   // 3. Load dedup sets
@@ -289,31 +448,36 @@ async function main() {
   const newOffers = [];
   const errors = [];
 
+  function considerJob(job, source) {
+    totalFound++;
+
+    if (!titleFilter(job.title)) {
+      totalFiltered++;
+      return;
+    }
+    if (seenUrls.has(job.url)) {
+      totalDupes++;
+      return;
+    }
+    const key = `${job.company.toLowerCase()}::${job.title.toLowerCase()}`;
+    if (seenCompanyRoles.has(key)) {
+      totalDupes++;
+      return;
+    }
+
+    // Mark as seen to avoid intra-scan dupes.
+    seenUrls.add(job.url);
+    seenCompanyRoles.add(key);
+    newOffers.push({ ...job, source });
+  }
+
   const tasks = targets.map(company => async () => {
     const { type, url } = company._api;
     try {
       const json = await fetchJson(url);
       const jobs = PARSERS[type](json, company.name);
-      totalFound += jobs.length;
-
       for (const job of jobs) {
-        if (!titleFilter(job.title)) {
-          totalFiltered++;
-          continue;
-        }
-        if (seenUrls.has(job.url)) {
-          totalDupes++;
-          continue;
-        }
-        const key = `${job.company.toLowerCase()}::${job.title.toLowerCase()}`;
-        if (seenCompanyRoles.has(key)) {
-          totalDupes++;
-          continue;
-        }
-        // Mark as seen to avoid intra-scan dupes
-        seenUrls.add(job.url);
-        seenCompanyRoles.add(key);
-        newOffers.push({ ...job, source: `${type}-api` });
+        considerJob(job, `${type}-api`);
       }
     } catch (err) {
       errors.push({ company: company.name, error: err.message });
@@ -321,6 +485,27 @@ async function main() {
   });
 
   await parallelFetch(tasks, CONCURRENCY);
+
+  if (browserTargets.length > 0) {
+    const { chromium } = await import('playwright');
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const browserTasks = browserTargets.map(company => async () => {
+        try {
+          const jobs = await scanBrowserCompany(browser, company);
+          for (const job of jobs) {
+            considerJob(job, 'browser');
+          }
+        } catch (err) {
+          errors.push({ company: company.name, error: `browser: ${err.message}` });
+        }
+      });
+
+      await parallelFetch(browserTasks, BROWSER_CONCURRENCY);
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  }
 
   // 5. Write results
   if (!dryRun && newOffers.length > 0) {
@@ -332,7 +517,9 @@ async function main() {
   console.log(`\n${'━'.repeat(45)}`);
   console.log(`Portal Scan — ${date}`);
   console.log(`${'━'.repeat(45)}`);
-  console.log(`Companies scanned:     ${targets.length}`);
+  console.log(`Companies scanned:     ${targets.length + browserTargets.length}`);
+  console.log(`  API targets:         ${targets.length}`);
+  console.log(`  Browser targets:     ${browserTargets.length}`);
   console.log(`Total jobs found:      ${totalFound}`);
   console.log(`Filtered by title:     ${totalFiltered} removed`);
   console.log(`Duplicates:            ${totalDupes} skipped`);
