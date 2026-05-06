@@ -37,6 +37,8 @@ const BROWSER_CONCURRENCY = 2;
 const FETCH_TIMEOUT_MS = 10_000;
 const PAGE_TIMEOUT_MS = 20_000;
 const MAX_BROWSER_JOBS_PER_COMPANY = 120;
+const WORKDAY_LIMIT = 20;
+const WORKDAY_MAX_PAGES = 10;
 
 // ── API detection ───────────────────────────────────────────────────
 
@@ -47,6 +49,20 @@ function detectApi(company) {
   }
 
   const url = company.careers_url || '';
+
+  // Workday Candidate Experience
+  const workdayMatch = url.match(/^https:\/\/([^/]+\.myworkdayjobs\.com)\/(?:[a-z]{2}-[A-Z]{2}\/)?([^/?#]+)/);
+  if (workdayMatch) {
+    const host = workdayMatch[1];
+    const site = workdayMatch[2];
+    const tenant = host.split('.')[0];
+    return {
+      type: 'workday',
+      url: `https://${host}/wday/cxs/${tenant}/${site}/jobs`,
+      host: `https://${host}`,
+      site,
+    };
+  }
 
   // Easycruit
   if (url.includes('easycruit.com')) {
@@ -153,6 +169,19 @@ function parseEasycruit(html, companyName, baseUrl) {
   }
 
   return jobs;
+}
+
+function parseWorkdayJobs(json, companyName, host, site) {
+  const postings = json.jobPostings || [];
+  return postings.map(j => {
+    const path = j.externalPath || j.url || '';
+    return {
+      title: j.title || '',
+      url: path ? new URL(path, `${host}/en-US/${site}/`).href : '',
+      company: companyName,
+      location: j.locationsText || j.location || '',
+    };
+  });
 }
 
 // ── Browser page parser ─────────────────────────────────────────────
@@ -357,16 +386,48 @@ async function scanBrowserCompany(browser, company) {
 
 // ── Fetch with timeout ──────────────────────────────────────────────
 
-async function fetchJson(url) {
+async function fetchJson(url, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { ...options, signal: controller.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function scanWorkday(company) {
+  const { url, host, site } = company._api;
+  const maxPages = Number(company.max_pages || WORKDAY_MAX_PAGES);
+  const jobs = [];
+
+  for (let page = 0; page < maxPages; page++) {
+    const offset = page * WORKDAY_LIMIT;
+    const json = await fetchJson(url, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        appliedFacets: {},
+        limit: WORKDAY_LIMIT,
+        offset,
+        searchText: '',
+      }),
+    });
+
+    const pageJobs = parseWorkdayJobs(json, company.name, host, site);
+    jobs.push(...pageJobs);
+
+    if (pageJobs.length < WORKDAY_LIMIT) break;
+    const total = Number(json.total || json.totalResults || 0);
+    if (total && jobs.length >= total) break;
+  }
+
+  return jobs;
 }
 
 async function fetchText(url) {
@@ -617,7 +678,9 @@ async function main() {
     try {
       const jobs = type === 'easycruit'
         ? parseEasycruit(await fetchText(url), company.name, url)
-        : PARSERS[type](await fetchJson(url), company.name);
+        : type === 'workday'
+          ? await scanWorkday(company)
+          : PARSERS[type](await fetchJson(url), company.name);
       for (const job of jobs) {
         considerJob(job, `${type}-api`, company);
       }
