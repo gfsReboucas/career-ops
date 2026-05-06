@@ -64,7 +64,7 @@ AI-powered, CLI-agnostic job search automation: pipeline tracking, offer evaluat
 | `analyze-patterns.mjs` | Pattern analysis script (JSON output) |
 | `followup-cadence.mjs` | Follow-up cadence calculator (JSON output) |
 | `data/follow-ups.md` | Follow-up history tracker |
-| `scan.mjs` | Zero-token portal scanner — hits Greenhouse/Ashby/Lever APIs directly, zero LLM cost |
+| `scan.mjs` | Zero-token portal scanner — hits Greenhouse/Ashby/Lever APIs directly and falls back to Playwright browser extraction for company career pages |
 | `check-liveness.mjs` | Job posting liveness checker |
 | `liveness-core.mjs` | Shared liveness logic (expired signals win over generic Apply text) |
 | `reports/` | Evaluation reports (format: `{###}-{company-slug}-{YYYY-MM-DD}.md`). Blocks A-F + G (Posting Legitimacy). Header includes `**Legitimacy:** {tier}`. |
@@ -258,14 +258,14 @@ Default modes are in `modes/` (English). Additional language-specific modes are 
 
 ## Headless / Batch Mode
 
-When spawning headless workers for batch processing, use the appropriate command for your CLI:
+When spawning headless workers for batch processing, use the appropriate command for your CLI. The bundled `batch/batch-runner.sh` defaults to Codex and supports `--cli claude` for Claude Code compatibility.
 
 | CLI | Command |
 |-----|---------|
+| Codex | `codex exec --sandbox workspace-write "prompt"` |
 | Claude Code | `claude -p "prompt"` |
 | Gemini CLI | `gemini -p "prompt"` |
 | Copilot CLI | `copilot -p "prompt"` |
-| Codex | `codex exec "prompt"` |
 | OpenCode | `opencode run "prompt"` |
 | Qwen | `qwen -p "prompt"` |
 

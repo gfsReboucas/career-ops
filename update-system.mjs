@@ -74,6 +74,8 @@ const SYSTEM_PATHS = [
   'dashboard/',
   'templates/',
   'fonts/',
+  '.agents/skills/',
+  '.codex/skills/',
   '.claude/skills/',
   '.gemini/commands/',
   'docs/',

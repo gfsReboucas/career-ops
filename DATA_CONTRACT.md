@@ -50,15 +50,17 @@ These files contain system logic, scripts, templates, and instructions that impr
 | `modes/ja/*` | Japanese language modes |
 | `modes/pt/*` | Portuguese language modes |
 | `modes/ru/*` | Russian language modes |
-| `CLAUDE.md` | Agent instructions |
-| `AGENTS.md` | Codex instructions |
+| `AGENTS.md` | Canonical Codex and agent instructions |
+| `CLAUDE.md` | Claude Code compatibility wrapper |
 | `*.mjs` | Utility scripts |
 | `batch/batch-prompt.md` | Batch worker prompt |
 | `batch/batch-runner.sh` | Batch orchestrator |
 | `dashboard/*` | Go TUI dashboard |
 | `templates/*` | Base templates |
 | `fonts/*` | Self-hosted fonts |
-| `.claude/skills/*` | Skill definitions |
+| `.agents/skills/*` | Portable skill definitions |
+| `.codex/skills/*` | Codex skill wrappers |
+| `.claude/skills/*` | Claude Code compatibility skill wrappers |
 | `docs/*` | Documentation |
 | `VERSION` | Current version number |
 | `DATA_CONTRACT.md` | This file |

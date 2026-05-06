@@ -1,7 +1,7 @@
 ---
 name: career-ops
 description: AI job search command center -- evaluate offers, generate CVs, scan portals, track applications
-arguments: mode # Claude Code specific
+arguments: mode # Optional; used by CLIs that pass slash-command arguments
 user-invocable: true
 argument-hint: "[scan | deep | pdf | oferta | ofertas | apply | batch | tracker | pipeline | contacto | training | project | interview-prep | update]"
 license: MIT
@@ -68,6 +68,25 @@ Inbox: add URLs to data/pipeline.md → /career-ops pipeline
 Or paste a JD directly to run the full pipeline.
 ```
 
+## Codex Invocation Examples
+
+Codex may invoke this skill by name instead of passing slash-command
+arguments. Treat these as equivalent:
+
+```
+Use the career-ops skill to scan for jobs.
+Use the career-ops skill in pipeline mode.
+Use the career-ops skill to evaluate this job URL: https://...
+Use the career-ops skill to generate an ATS PDF.
+```
+
+For non-interactive runs:
+
+```bash
+codex exec --sandbox workspace-write "Use the career-ops skill to run scan mode"
+codex exec --sandbox workspace-write "Use the career-ops skill to evaluate this job URL: https://..."
+```
+
 ---
 
 ## Context Loading by Mode
@@ -85,7 +104,7 @@ Read `modes/{mode}.md`
 Applies to: `tracker`, `deep`, `interview-prep`, `training`, `project`, `patterns`, `followup`
 
 ### Modes delegated to subagent:
-For `scan`, `apply` (with Playwright), and `pipeline` (3+ URLs): launch as Agent with the content of `_shared.md` + `modes/{mode}.md` injected into the subagent prompt.
+For `scan`, `apply` (with Playwright), and `pipeline` (3+ URLs): launch a subagent when the current agent environment supports it. In Codex, use explicit subagents only when the user asked for delegated/parallel work or the current runtime makes that available for this task. Inject the content of `_shared.md` + `modes/{mode}.md` into the subagent prompt.
 
 ```
 Agent(

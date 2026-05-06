@@ -157,10 +157,12 @@ console.log('\n5. Data contract validation');
 
 // Check system files exist
 const systemFiles = [
-  'CLAUDE.md', 'VERSION', 'DATA_CONTRACT.md',
+  'AGENTS.md', 'CLAUDE.md', 'VERSION', 'DATA_CONTRACT.md',
   'modes/_shared.md', 'modes/_profile.template.md',
   'modes/oferta.md', 'modes/pdf.md', 'modes/scan.md',
   'templates/states.yml', 'templates/cv-template.html',
+  '.agents/skills/career-ops/SKILL.md',
+  '.codex/skills/career-ops/SKILL.md',
   '.claude/skills/career-ops/SKILL.md',
 ];
 

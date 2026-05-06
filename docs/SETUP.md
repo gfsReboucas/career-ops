@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Claude Code](https://claude.ai/code) installed and configured
+- [Codex](https://developers.openai.com/codex/cli) installed and configured
 - Node.js 18+ (for PDF generation and utility scripts)
 - (Optional) Go 1.21+ (for the dashboard TUI)
 
@@ -44,13 +44,20 @@ Edit `portals.yml`:
 
 ### 5. Start using
 
-Open Claude Code in this directory:
+Open Codex in this directory:
 
 ```bash
-claude
+codex
 ```
 
 Then paste a job offer URL or description. Career-ops will automatically evaluate it, generate a report, create a tailored PDF, and track it.
+
+For non-interactive automation, use Codex exec:
+
+```bash
+codex exec --sandbox workspace-write "Use the career-ops skill to scan for jobs"
+codex exec --sandbox workspace-write "Use the career-ops skill to evaluate this job URL: https://..."
+```
 
 ## Available Commands
 

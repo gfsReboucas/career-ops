@@ -63,7 +63,7 @@ batch-input.tsv    →  batch-runner.sh  →  N × headless CLI workers
                     (tracks progress)
 ```
 
-Each worker is a headless AI CLI instance — the bundled `batch-runner.sh` invokes `claude -p`, but the architecture supports any CLI's headless mode (see the Headless / Batch Mode table in `AGENTS.md` for the correct command per CLI). Workers produce:
+Each worker is a headless AI CLI instance. The bundled `batch-runner.sh` defaults to `codex exec --sandbox workspace-write -` and also supports `--cli claude` for Claude Code compatibility. Workers produce:
 - Report .md
 - PDF
 - Tracker TSV line

@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# career-ops batch runner — standalone orchestrator for claude -p workers
-# Reads batch-input.tsv, delegates each offer to a claude -p worker,
+# career-ops batch runner — standalone orchestrator for headless AI workers
+# Reads batch-input.tsv, delegates each offer to a Codex/Claude worker,
 # tracks state in batch-state.tsv for resumability.
-#
-# NOTE: This script is Claude Code-specific. It uses claude -p with
-# --dangerously-skip-permissions and --append-system-prompt-file flags
-# that are not available in other CLIs. Multi-CLI support is out of scope
-# for now — contributions welcome.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -27,6 +22,7 @@ STATE_LOCK_TIMEOUT_SECONDS=30
 MAIN_PID="${BASHPID:-$$}"
 
 # Defaults
+CLI="codex"
 PARALLEL=1
 DRY_RUN=false
 RETRY_FAILED=false
@@ -36,12 +32,13 @@ MIN_SCORE=0
 
 usage() {
   cat <<'USAGE'
-career-ops batch runner — process job offers in batch via claude -p workers
-Uses your default Claude model (Claude Max subscription).
+career-ops batch runner — process job offers in batch via headless AI workers
+Defaults to Codex (`codex exec --sandbox workspace-write -`).
 
 Usage: batch-runner.sh [OPTIONS]
 
 Options:
+  --cli NAME           Worker CLI: codex or claude (default: codex)
   --parallel N         Number of parallel workers (default: 1)
   --dry-run            Show what would be processed, don't execute
   --retry-failed       Only retry offers marked as "failed" in state
@@ -61,8 +58,11 @@ Examples:
   # Dry run to see pending offers
   ./batch-runner.sh --dry-run
 
-  # Process all pending
+  # Process all pending with Codex
   ./batch-runner.sh
+
+  # Process all pending with Claude Code
+  ./batch-runner.sh --cli claude
 
   # Retry only failed offers
   ./batch-runner.sh --retry-failed
@@ -75,6 +75,7 @@ USAGE
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --cli) CLI="$2"; shift 2 ;;
     --parallel) PARALLEL="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --retry-failed) RETRY_FAILED=true; shift ;;
@@ -124,10 +125,24 @@ check_prerequisites() {
     exit 1
   fi
 
-  if ! command -v claude &>/dev/null; then
-    echo "ERROR: 'claude' CLI not found in PATH."
-    exit 1
-  fi
+  case "$CLI" in
+    codex)
+      if ! command -v codex &>/dev/null; then
+        echo "ERROR: 'codex' CLI not found in PATH."
+        exit 1
+      fi
+      ;;
+    claude)
+      if ! command -v claude &>/dev/null; then
+        echo "ERROR: 'claude' CLI not found in PATH."
+        exit 1
+      fi
+      ;;
+    *)
+      echo "ERROR: Unsupported --cli '$CLI'. Supported: codex, claude."
+      exit 1
+      ;;
+  esac
 
   mkdir -p "$LOGS_DIR" "$TRACKER_DIR" "$REPORTS_DIR"
 }
@@ -309,6 +324,29 @@ reserve_report_num() {
   run_with_state_lock reserve_report_num_unlocked "$@"
 }
 
+run_worker() {
+  local resolved_prompt="$1"
+  local prompt="$2"
+  local log_file="$3"
+
+  case "$CLI" in
+    codex)
+      {
+        printf '# System instructions\n\n'
+        cat "$resolved_prompt"
+        printf '\n\n# Task\n\n%s\n' "$prompt"
+      } | codex exec --sandbox workspace-write - > "$log_file" 2>&1
+      ;;
+    claude)
+      claude -p \
+        --dangerously-skip-permissions \
+        --append-system-prompt-file "$resolved_prompt" \
+        "$prompt" \
+        > "$log_file" 2>&1
+      ;;
+  esac
+}
+
 # Process a single offer
 process_offer() {
   local id="$1" url="$2" source="$3" notes="$4"
@@ -355,13 +393,9 @@ process_offer() {
     -e "s|{{ID}}|${esc_id}|g" \
     "$PROMPT_FILE" > "$resolved_prompt"
 
-  # Launch claude -p worker (uses default model from Claude Max subscription)
+  # Launch headless worker.
   local exit_code=0
-  claude -p \
-    --dangerously-skip-permissions \
-    --append-system-prompt-file "$resolved_prompt" \
-    "$prompt" \
-    > "$log_file" 2>&1 || exit_code=$?
+  run_worker "$resolved_prompt" "$prompt" "$log_file" || exit_code=$?
 
   # Cleanup resolved prompt
   rm -f "$resolved_prompt"
@@ -466,6 +500,7 @@ main() {
   fi
 
   echo "=== career-ops batch runner ==="
+  echo "CLI: $CLI"
   echo "Parallel: $PARALLEL | Max retries: $MAX_RETRIES"
   echo "Input: $total_input offers"
   echo ""
