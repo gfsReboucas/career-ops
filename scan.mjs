@@ -48,6 +48,11 @@ function detectApi(company) {
 
   const url = company.careers_url || '';
 
+  // Easycruit
+  if (url.includes('easycruit.com')) {
+    return { type: 'easycruit', url };
+  }
+
   // Ashby
   const ashbyMatch = url.match(/jobs\.ashbyhq\.com\/([^/?#]+)/);
   if (ashbyMatch) {
@@ -111,6 +116,44 @@ function parseLever(json, companyName) {
 }
 
 const PARSERS = { greenhouse: parseGreenhouse, ashby: parseAshby, lever: parseLever };
+
+function decodeHtml(value) {
+  return String(value || '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
+function stripHtml(value) {
+  return cleanText(decodeHtml(String(value || '').replace(/<[^>]*>/g, ' ')));
+}
+
+function parseEasycruit(html, companyName, baseUrl) {
+  const jobs = [];
+  const rowRegex = /<div class="joblist-table-cell joblist-title"><a href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/div>[\s\S]*?<div class="joblist-table-cell joblist-departments"><div class="device">Avdeling:\s*<\/div>([\s\S]*?)<\/div>\s*<div class="joblist-table-cell joblist-location"><div class="device">Arbeidssted:\s*<\/div>([\s\S]*?)<\/div>/g;
+
+  for (const match of html.matchAll(rowRegex)) {
+    const [, href, titleHtml, departmentHtml, locationHtml] = match;
+    const title = stripHtml(titleHtml);
+    const department = stripHtml(departmentHtml);
+    const location = stripHtml(locationHtml);
+    if (!title || !href) continue;
+
+    jobs.push({
+      title,
+      url: new URL(href, baseUrl).href,
+      company: companyName,
+      location,
+      department,
+    });
+  }
+
+  return jobs;
+}
 
 // ── Browser page parser ─────────────────────────────────────────────
 
@@ -231,6 +274,59 @@ async function extractBrowserJobs(page, company) {
   return jobs;
 }
 
+function isKongsbergVacanciesPage(company) {
+  try {
+    const url = new URL(company.careers_url || '');
+    return url.hostname === 'www.kongsberg.com' && url.pathname.startsWith('/careers/vacancies');
+  } catch {
+    return false;
+  }
+}
+
+async function extractKongsbergJobs(page, company) {
+  const rows = await page.evaluate(() => {
+    const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const items = [];
+
+    for (const anchor of document.querySelectorAll('a[href*="/careers/vacancies/"]')) {
+      const url = anchor.href;
+      if (!url || /\/careers\/vacancies\/?$/.test(new URL(url).pathname)) continue;
+
+      const text = clean(anchor.innerText || anchor.textContent || '');
+      const match = text.match(/^(.*?)\s+Location:\s*(.*?)\s+read more$/i);
+      const title = clean(match ? match[1] : text.replace(/\s+read more$/i, ''));
+      const location = clean(match ? match[2] : '');
+
+      if (title) items.push({ title, url, location });
+    }
+
+    return items;
+  });
+
+  const seen = new Set();
+  const jobs = [];
+  for (const row of rows) {
+    const title = cleanText(row.title);
+    const url = cleanText(row.url).replace(/[),.]+$/, '');
+    if (!title || !url) continue;
+
+    const key = `${title.toLowerCase()}::${url}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    jobs.push({
+      title,
+      url,
+      company: company.name,
+      location: cleanText(row.location),
+    });
+
+    if (jobs.length >= MAX_BROWSER_JOBS_PER_COMPANY) break;
+  }
+
+  return jobs;
+}
+
 async function scanBrowserCompany(browser, company) {
   const page = await browser.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
@@ -246,6 +342,11 @@ async function scanBrowserCompany(browser, company) {
     for (let i = 0; i < 3; i++) {
       await page.mouse.wheel(0, 2500);
       await page.waitForTimeout(400);
+    }
+
+    if (isKongsbergVacanciesPage(company)) {
+      const jobs = await extractKongsbergJobs(page, company);
+      if (jobs.length > 0) return jobs;
     }
 
     return await extractBrowserJobs(page, company);
@@ -268,6 +369,18 @@ async function fetchJson(url) {
   }
 }
 
+async function fetchText(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Title filter ────────────────────────────────────────────────────
 
 function buildTitleFilter(titleFilter) {
@@ -276,6 +389,19 @@ function buildTitleFilter(titleFilter) {
 
   return (title) => {
     const lower = title.toLowerCase();
+    const hasPositive = positive.length === 0 || positive.some(k => lower.includes(k));
+    const hasNegative = negative.some(k => lower.includes(k));
+    return hasPositive && !hasNegative;
+  };
+}
+
+function buildLocationFilter(locationFilter) {
+  const positive = (locationFilter?.positive || []).map(k => k.toLowerCase());
+  const negative = (locationFilter?.negative || []).map(k => k.toLowerCase());
+
+  return (location) => {
+    if (positive.length === 0 && negative.length === 0) return true;
+    const lower = String(location || '').toLowerCase();
     const hasPositive = positive.length === 0 || positive.some(k => lower.includes(k));
     const hasNegative = negative.some(k => lower.includes(k));
     return hasPositive && !hasNegative;
@@ -459,10 +585,14 @@ async function main() {
   const newOffers = [];
   const errors = [];
 
-  function considerJob(job, source) {
+  function considerJob(job, source, sourceCompany = {}) {
     totalFound++;
 
     if (!titleFilter(job.title)) {
+      totalFiltered++;
+      return;
+    }
+    if (!buildLocationFilter(sourceCompany.location_filter)(job.location)) {
       totalFiltered++;
       return;
     }
@@ -485,10 +615,11 @@ async function main() {
   const tasks = targets.map(company => async () => {
     const { type, url } = company._api;
     try {
-      const json = await fetchJson(url);
-      const jobs = PARSERS[type](json, company.name);
+      const jobs = type === 'easycruit'
+        ? parseEasycruit(await fetchText(url), company.name, url)
+        : PARSERS[type](await fetchJson(url), company.name);
       for (const job of jobs) {
-        considerJob(job, `${type}-api`);
+        considerJob(job, `${type}-api`, company);
       }
     } catch (err) {
       errors.push({ company: company.name, error: err.message });
@@ -505,7 +636,7 @@ async function main() {
         try {
           const jobs = await scanBrowserCompany(browser, company);
           for (const job of jobs) {
-            considerJob(job, 'browser');
+            considerJob(job, 'browser', company);
           }
         } catch (err) {
           errors.push({ company: company.name, error: `browser: ${err.message}` });
