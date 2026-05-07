@@ -50,6 +50,11 @@ function detectApi(company) {
 
   const url = company.careers_url || '';
 
+  // Dayforce job details pages expose structured Next.js data.
+  if (url.includes('jobs.dayforcehcm.com')) {
+    return { type: 'dayforce', url };
+  }
+
   // Workday Candidate Experience
   const workdayMatch = url.match(/^https:\/\/([^/]+\.myworkdayjobs\.com)\/(?:[a-z]{2}-[A-Z]{2}\/)?([^/?#]+)/);
   if (workdayMatch) {
@@ -182,6 +187,41 @@ function parseWorkdayJobs(json, companyName, host, site) {
       location: j.locationsText || j.location || '',
     };
   });
+}
+
+function extractNextData(html) {
+  const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+  if (!match) return null;
+  return JSON.parse(decodeHtml(match[1]));
+}
+
+function parseDayforceJob(html, fallbackCompany, pageUrl) {
+  const data = extractNextData(html);
+  const job = data?.props?.pageProps?.jobData;
+  if (!job) return [];
+
+  const content = job.jobPostingContent || {};
+  const company =
+    fallbackCompany ||
+    stripHtml(content.companyName) ||
+    stripHtml(content.clientName) ||
+    'Dayforce';
+  const location = (job.postingLocations || [])
+    .map(l => l.formattedAddress || [l.cityName, l.stateCode, l.isoCountryCode].filter(Boolean).join(', '))
+    .filter(Boolean)
+    .join('; ');
+
+  return [{
+    title: job.jobTitle || '',
+    url: pageUrl,
+    company,
+    location,
+    description: stripHtml([
+      content.jobDescriptionHeader,
+      content.jobDescription,
+      content.jobDescriptionFooter,
+    ].filter(Boolean).join('\n')),
+  }].filter(j => j.title && j.url);
 }
 
 // ── Browser page parser ─────────────────────────────────────────────
@@ -680,7 +720,9 @@ async function main() {
         ? parseEasycruit(await fetchText(url), company.name, url)
         : type === 'workday'
           ? await scanWorkday(company)
-          : PARSERS[type](await fetchJson(url), company.name);
+          : type === 'dayforce'
+            ? parseDayforceJob(await fetchText(url), company.name, url)
+            : PARSERS[type](await fetchJson(url), company.name);
       for (const job of jobs) {
         considerJob(job, `${type}-api`, company);
       }
